@@ -3,21 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#124e43">
+  <meta name="theme-color" content="#FF922B">
   <meta name="description" content="学園祭の企画を番号・名前・テント番号などで探すオフライン検索試作">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-title" content="企画検索">
+  <meta name="apple-mobile-web-app-title" content="sopo_denki_search_system">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" sizes="180x180" href="icons/icon-180.png">
   <link rel="stylesheet" href="styles.css">
-  <title>企画検索</title>
+  <title>sopo_denki_search_system</title>
 </head>
 <body>
   <main class="shell">
     <header>
       <p class="eyebrow">資料を登録して使う · オフライン対応</p>
       <h1>企画を探す</h1>
+      <p class="app-version">バージョン 1.0.11</p>
       <p class="intro">企画番号、企画名、キーワード、テント番号などを入力してください。</p>
       <section id="install-card" class="install-card" aria-label="アプリの追加">
         <strong id="install-title">このアプリをスマートフォンに追加</strong>
@@ -27,11 +28,11 @@
       </section>
     </header>
     <section class="search-panel" aria-label="検索">
-      <nav class="main-tabs" aria-label="表示切替"><button id="projects-tab" class="tab active" type="button">企画を探す</button><button id="documents-tab" class="tab" type="button">資料・登録状況</button></nav>
+      <nav class="main-tabs" aria-label="表示切替"><button id="projects-tab" class="tab active" type="button">企画を探す</button><button id="documents-tab" class="tab" type="button">資料の登録</button></nav>
       <div id="project-search">
       <label for="query">検索語</label>
       <div class="search-row">
-        <input id="query" type="search" placeholder="例：002、コピカツ、C4" autocomplete="off">
+        <input id="query" type="search" placeholder="例：企画番号、企画名、テント番号" autocomplete="off">
         <button id="clear" type="button" aria-label="検索語を消去">消去</button>
       </div>
       <div class="filters" role="group" aria-label="場所">
@@ -42,21 +43,17 @@
       <p id="status" class="status" aria-live="polite"></p>
       </div>
       <div id="document-search" hidden>
-        <p class="intro">各資料はこの端末だけに保存されます。登録済みの枠に新しいPDFを選ぶと差し替わります。</p>
+        <p class="intro">各資料はこの端末だけに保存されます。電力シートは屋内・屋外ごとに、エリア別の複数ファイルか全体1ファイルを選べます。どの形式でも登録したPDFすべてから企画を作成し、検索します。</p>
         <section class="upload-slots" aria-labelledby="upload-slots-title">
           <h2 id="upload-slots-title">資料の登録状況</h2>
           <div class="upload-slot-grid">
             <article class="upload-slot" data-upload-slot="wiring-indoor"><h3>配線図 · 屋内</h3><p class="slot-current" id="slot-status-wiring-indoor">読み込み中…</p><input id="slot-file-wiring-indoor" class="slot-file-input" type="file" accept=".pdf,application/pdf" data-slot="wiring-indoor"><label class="slot-file-label" for="slot-file-wiring-indoor">PDFを選ぶ</label></article>
             <article class="upload-slot" data-upload-slot="wiring-outdoor"><h3>配線図 · 屋外</h3><p class="slot-current" id="slot-status-wiring-outdoor">読み込み中…</p><input id="slot-file-wiring-outdoor" class="slot-file-input" type="file" accept=".pdf,application/pdf" data-slot="wiring-outdoor"><label class="slot-file-label" for="slot-file-wiring-outdoor">PDFを選ぶ</label></article>
-            <article class="upload-slot" data-upload-slot="power-indoor"><h3>電力シート · 屋内</h3><p class="slot-current" id="slot-status-power-indoor">読み込み中…</p><input id="slot-file-power-indoor" class="slot-file-input" type="file" accept=".pdf,application/pdf" data-slot="power-indoor"><label class="slot-file-label" for="slot-file-power-indoor">PDFを選ぶ</label></article>
-            <article class="upload-slot" data-upload-slot="power-outdoor"><h3>電力シート · 屋外</h3><p class="slot-current" id="slot-status-power-outdoor">読み込み中…</p><input id="slot-file-power-outdoor" class="slot-file-input" type="file" accept=".pdf,application/pdf" data-slot="power-outdoor"><label class="slot-file-label" for="slot-file-power-outdoor">PDFを選ぶ</label></article>
           </div>
+          <div id="power-slot-groups"></div>
+          <p class="upload-help">ファイルサイズにアプリ側の固定上限はありません。保存できる大きさは、端末の空き容量とブラウザーにより異なります。</p>
           <p id="upload-status" class="status" aria-live="polite"></p>
-        </section>
-        <label for="doc-query">資料の検索</label><input id="doc-query" type="search" placeholder="資料名、種類、エリア、キーワード" autocomplete="off">
-        <p id="doc-count" class="status" aria-live="polite"></p>
-        <section id="import-review" class="import-review" hidden aria-label="電力シートから読み取った企画">
-          <button id="create-project-pages" class="save-doc" type="button">確認した内容で企画ページを作成</button>
+        </section>        <section id="import-review" class="import-review" hidden aria-label="電力シートから読み取った企画">
           <h2>企画ページの内容を確認</h2>
           <p class="meta">読み取った企画名・番号などを確認し、必要なら直してから作成してください。元PDFの該当ページも各企画ページに表示されます。</p>
           <div id="import-preview" class="import-preview"></div>

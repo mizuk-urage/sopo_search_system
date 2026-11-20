@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#FF922B">
+  <meta name="description" content="学園祭の企画を番号・名前・テント番号などで探すオフライン検索試作">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="sopo_denki_search_system">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/icon-180.png">
+  <link rel="stylesheet" href="styles.css">
+  <title>企画ページ</title>
+</head>
+<body class="project-page">
+  <main class="shell">
+    <header>
+      <p class="eyebrow">資料を登録して使う · オフライン対応</p>
+      <h1>企画ページ</h1>
+      <p class="app-version">バージョン 1.0.11</p>
+      
+      <section id="install-card" class="install-card" aria-label="アプリの追加">
+        <strong id="install-title">このアプリをスマートフォンに追加</strong>
+        <p id="install-help">ホーム画面に追加すると、次からアイコンで開けます。</p>
+        <div class="install-actions"><button id="install-app" class="install-button" type="button" hidden>アプリをインストール</button><button id="share-app" class="share-button" type="button">リンクを共有</button></div>
+        <p id="install-status" class="install-status" aria-live="polite"></p>
+      </section>
+    </header>
+    <section class="search-panel" aria-label="検索">
+      <nav class="main-tabs" aria-label="表示切替"><button id="projects-tab" class="tab active" type="button">企画を探す</button><button id="documents-tab" class="tab" type="button">資料の登録</button></nav>
+      <div id="project-search">
+      <label for="query">検索語</label>
+      <div class="search-row">
+        <input id="query" type="search" placeholder="例：企画番号、企画名、テント番号" autocomplete="off">
+        <button id="clear" type="button" aria-label="検索語を消去">消去</button>
+      </div>
+      <div class="filters" role="group" aria-label="場所">
+        <button class="filter active" data-filter="all" type="button" aria-pressed="true">すべて</button>
+        <button class="filter" data-filter="indoor" type="button" aria-pressed="false">屋内</button>
+        <button class="filter" data-filter="outdoor" type="button" aria-pressed="false">屋外</button>
+      </div>
+      <p id="status" class="status" aria-live="polite"></p>
+      </div>
+      <div id="document-search" hidden>
+        <p class="intro">各資料はこの端末だけに保存されます。電力シートは屋内・屋外ごとに、エリア別の複数ファイルか全体1ファイルを選べます。どの形式でも登録したPDFすべてから企画を作成し、検索します。</p>
+        <section class="upload-slots" aria-labelledby="upload-slots-title">
+          <h2 id="upload-slots-title">資料の登録状況</h2>
+          <div class="upload-slot-grid">
+            <article class="upload-slot" data-upload-slot="wiring-indoor"><h3>配線図 · 屋内</h3><p class="slot-current" id="slot-status-wiring-indoor">読み込み中…</p><input id="slot-file-wiring-indoor" class="slot-file-input" type="file" accept=".pdf,application/pdf" data-slot="wiring-indoor"><label class="slot-file-label" for="slot-file-wiring-indoor">PDFを選ぶ</label></article>
+            <article class="upload-slot" data-upload-slot="wiring-outdoor"><h3>配線図 · 屋外</h3><p class="slot-current" id="slot-status-wiring-outdoor">読み込み中…</p><input id="slot-file-wiring-outdoor" class="slot-file-input" type="file" accept=".pdf,application/pdf" data-slot="wiring-outdoor"><label class="slot-file-label" for="slot-file-wiring-outdoor">PDFを選ぶ</label></article>
+          </div>
+          <div id="power-slot-groups"></div>
+          <p class="upload-help">ファイルサイズにアプリ側の固定上限はありません。保存できる大きさは、端末の空き容量とブラウザーにより異なります。</p>
+          <p id="upload-status" class="status" aria-live="polite"></p>
+        </section>        <section id="import-review" class="import-review" hidden aria-label="電力シートから読み取った企画">
+          <h2>企画ページの内容を確認</h2>
+          <p class="meta">読み取った企画名・番号などを確認し、必要なら直してから作成してください。元PDFの該当ページも各企画ページに表示されます。</p>
+          <div id="import-preview" class="import-preview"></div>
+          <button id="cancel-project-pages" class="cancel-doc" type="button">今回は登録しない</button>
+        </section>
+      </div>
+    </section>
+    <section id="results" class="results" aria-label="検索結果"></section>
+    <footer>初回はオンラインで開いて保存が終わるのを待ってください。その後はPC・スマートフォンともオフラインで使えます。画面から追加した資料は登録したブラウザー内に保存されます。</footer>
+  </main>
+  <script type="module" src="pdf-import.js"></script>
+  <script src="app.js" defer></script>
+</body>
+</html>

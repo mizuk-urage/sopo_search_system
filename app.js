@@ -10,6 +10,42 @@ function searchable(record) {
   ].join(" "));
 }
 
+function matchPdfPages(projectName, pageTexts) {
+  const term = normalize(projectName);
+  if (term.length < 2 || !Array.isArray(pageTexts)) return [];
+  return pageTexts.flatMap((text, index) => normalize(text).includes(term) ? [index + 1] : []);
+}
+
+function wiringPageSelection(projectName, pageTexts, pageCount) {
+  const matchedPages=matchPdfPages(projectName,pageTexts);
+  const total=Math.max(1,Number(pageCount)||pageTexts?.length||1);
+  return {matchedPages,displayPages:matchedPages.length?matchedPages:Array.from({length:total},(_,index)=>index+1),fallback:matchedPages.length===0};
+}
+
+function uniqueProjects(records) {
+  const unique = new Map();
+  for (const record of records) {
+    const number=String(record.projectNumber??"").trim();
+    const name=normalize(record.projectName||"");
+    const key=`${record.area}|${number||`name:${name||record.id}`}`;
+    const previous=unique.get(key);
+    if(!previous){unique.set(key,record);continue;}
+    const richness=value=>["projectName","organization","tentNumber","location","approvedPower","powerDetails","searchText"].filter(field=>value[field]).length;
+    const preferred=richness(record)>richness(previous)?record:previous;
+    const other=preferred===record?previous:record;
+    const refsByKey=new Map();
+    for(const ref of [...(previous.localReferences||[]),...(record.localReferences||[])]){
+      const refKey=`${ref.docId||""}|${ref.role||""}|${ref.label||""}`;
+      const prior=refsByKey.get(refKey);
+      refsByKey.set(refKey,prior?{...prior,pageStart:Math.min(prior.pageStart,ref.pageStart),pageEnd:Math.max(prior.pageEnd,ref.pageEnd)}:ref);
+    }
+    const merged={...preferred};
+    for(const field of ["organization","location","tentNumber","approvedPower","controlRoom","powerDetails","otherText"])if(!merged[field]&&other[field])merged[field]=other[field];
+    unique.set(key,{...merged,region:[...new Set([previous.region,record.region].filter(Boolean))].join("・"),searchText:[...new Set([previous.searchText,record.searchText].filter(Boolean))].join(" "),keywords:[...new Set([...(previous.keywords||[]),...(record.keywords||[])])],localReferences:[...refsByKey.values()]});
+  }
+  return [...unique.values()];
+}
+
 if (typeof document !== "undefined") {
 const state = { records: [], filter: "all" };
 const input = document.querySelector("#query");
@@ -55,17 +91,25 @@ if(location.protocol==="file:"){
   document.querySelectorAll(".slot-file-input").forEach(input=>input.disabled=true);
   uploadStatus.textContent="資料の登録にはGitHub PagesなどHTTPSのURLで開いてください。この単体HTMLは検索・閲覧用です。";
 }
-let documentResults = document.querySelector("#document-results");
 const localDocuments = [];
 let pendingProjectImport = [];
 let pendingDocument = null;
+let pendingPowerReading = null;
 const generatedStorageKey = "festival-search-generated-projects-v1";
-const uploadSlots = [
+const powerGroups=[
+  {id:"indoor",area:"屋内",areaKey:"indoor",items:[["third","第三エリア"],["second","第二エリア"],["first","第一エリア"],["taiiku","体芸エリア"],["other","その他"]]},
+  {id:"outdoor",area:"屋外",areaKey:"outdoor",items:[["second-third","第二・第三エリア"],["stone-plaza","石の広場周辺"],["first","第一エリア"],["matsumi","松美池周辺"],["hall","会館エリア"],["taiiku","体芸エリア"]]}
+];
+const powerSlots=powerGroups.flatMap(group=>[
+  ...group.items.map(([key,region])=>({id:`power-${group.id}-${key}`,type:"電力シート",area:group.area,areaKey:group.areaKey,region})),
+  {id:`power-${group.id}-all`,legacyId:`power-${group.id}`,type:"電力シート",area:group.area,areaKey:group.areaKey,region:"全体",single:true}
+]);
+const uploadSlots=[
   {id:"wiring-indoor",type:"配線図",area:"屋内",areaKey:"indoor"},
   {id:"wiring-outdoor",type:"配線図",area:"屋外",areaKey:"outdoor"},
-  {id:"power-indoor",type:"電力シート",area:"屋内",areaKey:"indoor"},
-  {id:"power-outdoor",type:"電力シート",area:"屋外",areaKey:"outdoor"}
+  ...powerSlots
 ];
+const powerModeStorageKey="festival-search-power-mode-v1";
 
 const dbReady = typeof indexedDB === "undefined" ? Promise.reject(new Error("このブラウザーでは端末保存を使えません")) : new Promise((resolve, reject) => {
   const request = indexedDB.open("festival-search-local", 1);
@@ -74,72 +118,119 @@ const dbReady = typeof indexedDB === "undefined" ? Promise.reject(new Error("こ
 });
 dbReady.catch(() => {});
 function dbAction(mode, action, value) { return dbReady.then(db => new Promise((resolve, reject) => { const tx = db.transaction("documents", mode); const req = action === "getAll" ? tx.objectStore("documents").getAll() : tx.objectStore("documents")[action](value); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); })).catch(error => { throw new Error(error?.message || "端末保存を利用できません。HTTPSのアプリとして開いてください。"); }); }
-function staticDocuments() {
-  const docs = new Map();
-  state.records.forEach(record => (record.references || []).forEach(ref => {
-    const key = `${ref.file}|${ref.label}`; if (!docs.has(key)) docs.set(key, { id:key, name:ref.file.split("/").pop(), type:ref.label.includes("電力シート")?"電力シート":ref.label.includes("配線図")?"配線図":"その他", area:record.area === "indoor" ? "屋内" : "屋外", terms:"", file:ref.file, pages:new Set(), projects:new Set() });
-    const doc=docs.get(key); doc.pages.add(ref.page); doc.projects.add(record.projectName || record.projectNumber);
-  })); return [...docs.values()];
-}
-function renderDocuments() {
-  if (!documentResults) return;
-  const q=normalize(document.querySelector("#doc-query").value);
-  const docs=[...staticDocuments(),...localDocuments].filter(d=>!q||normalize([d.name,d.type,d.area,d.terms,[...(d.projects||[])].join(" ")].join(" ")).includes(q));
-  document.querySelector("#doc-count").textContent=`${docs.length}件の資料`;
-  documentResults.innerHTML=docs.length?docs.map(d=>{ const href=d.url || `data/${encodeURIComponent(d.file).replace(/%2F/g,"/")}`; const pages=d.pages?.size?` · 該当ページ ${[...d.pages].sort((a,b)=>a-b).join(", ")}`:""; const projects=d.projects?.size?` · 関連企画 ${[...d.projects].slice(0,4).map(safe).join("、")}`:""; const snippet=String(d.terms||"").slice(0,180); return `<article class="card"><h2>${safe(d.name)}</h2><p class="meta"><span class="badge">${safe(d.type)}</span><span class="badge">${safe(d.area)}</span>${safe(pages)}${safe(projects)}</p><p class="meta">${safe(snippet)}${d.terms?.length>180?"…":""}</p><div class="links"><a href="${safe(href)}" target="_blank" rel="noopener">資料を開く ↗</a></div></article>`;}).join(""):'<div class="empty">一致する資料はありません。</div>';
-}
-function slotDocuments(slot){return localDocuments.filter(doc=>doc.type===slot.type&&doc.area===slot.area);}
+function slotDocuments(slot){return localDocuments.filter(doc=>doc.type===slot.type&&doc.area===slot.area&&(doc.slotId===slot.id||doc.id===`slot:${slot.id}`||(slot.legacyId&&doc.id===`slot:${slot.legacyId}`)));}
 function currentSlotDocument(slot){const documents=slotDocuments(slot);return documents.find(doc=>doc.id===`slot:${slot.id}`)||documents.sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0)).at(0)||null;}
-function renderUploadSlots(){for(const slot of uploadSlots){const current=currentSlotDocument(slot);const statusNode=document.querySelector(`#slot-status-${slot.id}`);const label=document.querySelector(`label[for="slot-file-${slot.id}"]`);statusNode.textContent=current?`登録中：${current.name}`:"未登録";statusNode.title=current?.name||"この枠には資料が登録されていません";label.textContent=current?"差し替える":"PDFを選ぶ";}}
-async function removeObsoleteSlotDocuments(ids){if(!ids.length)return;for(const id of ids)await dbAction("readwrite","delete",id);const obsolete=new Set(ids);const saved=JSON.parse(localStorage.getItem(generatedStorageKey)||"[]").filter(record=>!(record.localReferences||[]).some(ref=>obsolete.has(ref.docId)));localStorage.setItem(generatedStorageKey,JSON.stringify(saved));state.records=state.records.filter(record=>!(record.localReferences||[]).some(ref=>obsolete.has(ref.docId)));}
-async function loadLocalDocuments() { try { localDocuments.forEach(d=>d.url&&URL.revokeObjectURL(d.url)); localDocuments.splice(0,localDocuments.length,...(await dbAction("readonly","getAll")).map(d=>({...d,local:true,url:URL.createObjectURL(d.blob)}))); } catch(e) { uploadStatus.textContent="端末保存を使えません。HTTPSで配布したアプリをインストールして開いてください。"; console.warn(e); } renderUploadSlots(); renderDocuments(); }
+function renderUploadSlots(){for(const slot of uploadSlots){const current=currentSlotDocument(slot);const statusNode=document.querySelector(`#slot-status-${slot.id}`);const label=document.querySelector(`label[for="slot-file-${slot.id}"]`);statusNode.textContent=current?`登録中：${current.name}`:"未登録";statusNode.title=current?.name||"この枠には資料が登録されていません";label.textContent=current?"差し替える":"PDFを選ぶ";}powerGroups.forEach(group=>updatePowerModeView(group.id));}
+function readPowerMode(groupId){try{return JSON.parse(localStorage.getItem(powerModeStorageKey)||"{}")[groupId]==="single"?"single":"multiple";}catch{return"multiple";}}
+function renderPowerSlotGroups(){
+  const host=document.querySelector("#power-slot-groups");
+  host.innerHTML=powerGroups.map(group=>{
+    const mode=readPowerMode(group.id);
+    const cards=slots=>slots.map(slot=>`<article class="upload-slot" data-upload-slot="${slot.id}"><h4>${safe(slot.region)}</h4><p class="slot-current" id="slot-status-${slot.id}">読み込み中…</p><input id="slot-file-${slot.id}" class="slot-file-input" type="file" accept=".pdf,application/pdf" data-slot="${slot.id}"><div class="upload-actions"><label class="slot-file-label" for="slot-file-${slot.id}">PDFを選ぶ</label><button class="create-project-pages" data-slot="${slot.id}" type="button" disabled>企画を登録</button></div></article>`).join("");
+    const multi=powerSlots.filter(slot=>slot.areaKey===group.areaKey&&!slot.single);
+    const single=powerSlots.filter(slot=>slot.areaKey===group.areaKey&&slot.single);
+    return `<section class="power-group" data-power-group="${group.id}"><h3>電力シート · ${group.area}</h3><fieldset class="power-mode"><legend>登録方法</legend><label><input type="radio" name="power-mode-${group.id}" value="multiple" ${mode==="multiple"?"checked":""}>エリア別に複数ファイル</label><label><input type="radio" name="power-mode-${group.id}" value="single" ${mode==="single"?"checked":""}>全体を1ファイル</label></fieldset><p class="power-mode-note" data-mode-note></p><div class="power-mode-panel" data-mode-panel="multiple" ${mode!=="multiple"?"hidden":""}><div class="power-slot-grid">${cards(multi)}</div></div><div class="power-mode-panel" data-mode-panel="single" ${mode!=="single"?"hidden":""}><div class="power-slot-grid">${cards(single)}</div></div></section>`;
+  }).join("");
+  host.addEventListener("change",event=>{
+    const radio=event.target.closest('input[type="radio"][name^="power-mode-"]');if(!radio)return;
+    const groupId=radio.name.replace("power-mode-","");
+    const pendingSlot=powerSlots.find(slot=>slot.id===pendingDocument?.slotId)||powerSlots.find(slot=>slot.id===pendingPowerReading);
+    if(pendingSlot?.areaKey===groupId&&Boolean(pendingSlot.single)!==(radio.value==="single")){
+      radio.checked=false;rootModeChoice(groupId,pendingSlot.single?"single":"multiple").checked=true;
+      uploadStatus.textContent="読み取り済みの企画を登録または取り消してから、登録方法を変更してください。";return;
+    }
+    try{const modes=JSON.parse(localStorage.getItem(powerModeStorageKey)||"{}");modes[groupId]=radio.value;localStorage.setItem(powerModeStorageKey,JSON.stringify(modes));}catch{}
+    updatePowerModeView(groupId);
+  });
+  powerGroups.forEach(group=>updatePowerModeView(group.id));
+}
+function rootModeChoice(groupId,mode){return document.querySelector(`[name="power-mode-${groupId}"][value="${mode}"]`);}
+function updatePowerModeView(groupId){
+  const root=document.querySelector(`[data-power-group="${groupId}"]`);if(!root)return;
+  const mode=root.querySelector(`input[name="power-mode-${groupId}"]:checked`)?.value||"multiple";
+  root.querySelectorAll("[data-mode-panel]").forEach(panel=>panel.hidden=panel.dataset.modePanel!==mode);
+  const inactive=powerSlots.filter(slot=>slot.areaKey===groupId&&(mode==="single"?!slot.single:slot.single)).map(slot=>({slot,doc:currentSlotDocument(slot)})).filter(item=>item.doc);
+  root.querySelector("[data-mode-note]").textContent=inactive.length?`別の登録方法にも資料があります（${inactive.map(item=>`${item.slot.region}：${item.doc.name}`).join("、")}).これらの資料も企画検索の対象です。`:"登録したファイル名は各項目に表示されます。";
+}
+renderPowerSlotGroups();
+function withoutDocumentReferences(record,ids){const removed=new Set(ids);const oldRefs=record.localReferences||[];const localReferences=oldRefs.filter(ref=>!removed.has(ref.docId));return{record:{...record,localReferences},keep:!oldRefs.length||localReferences.length>0};}
+async function removeObsoleteSlotDocuments(ids){if(!ids.length)return;for(const id of ids)await dbAction("readwrite","delete",id);const saved=JSON.parse(localStorage.getItem(generatedStorageKey)||"[]").map(record=>withoutDocumentReferences(record,ids)).filter(item=>item.keep).map(item=>item.record);localStorage.setItem(generatedStorageKey,JSON.stringify(saved));state.records=uniqueProjects(state.records.map(record=>withoutDocumentReferences(record,ids)).filter(item=>item.keep).map(item=>item.record));}
+function removeOrphanedProjectPages(){
+  const sourceIds=new Set(localDocuments.map(doc=>doc.id));
+  try{
+    const saved=JSON.parse(localStorage.getItem(generatedStorageKey)||"[]");
+    const kept=saved.map(record=>{const oldRefs=record.localReferences||[];const localReferences=oldRefs.filter(ref=>sourceIds.has(ref.docId));return{record:{...record,localReferences},keep:!oldRefs.length||localReferences.length>0};}).filter(item=>item.keep).map(item=>item.record);
+    if(kept.length!==saved.length)localStorage.setItem(generatedStorageKey,JSON.stringify(kept));
+    const keptIds=new Set(kept.map(record=>record.id));
+    state.records=uniqueProjects(state.records.map(record=>{const oldRefs=record.localReferences||[];const localReferences=oldRefs.filter(ref=>sourceIds.has(ref.docId));return{record:{...record,localReferences},keep:!oldRefs.length||localReferences.length>0};}).filter(item=>item.keep).map(item=>item.record).filter(record=>!(record.localReferences||[]).length||keptIds.has(record.id)));
+  }catch(error){console.warn("保存済み企画ページを確認できませんでした",error);}
+}
+async function indexUnindexedWiringPdfs(){
+  const parser=await window.FestivalPdfImportReady;
+  for(const doc of localDocuments.filter(item=>item.type==="配線図"&&!Array.isArray(item.pageTexts))){
+    try{
+      const info=await parser.inspectPdf(doc.blob);
+      doc.pageCount=info.pageCount;doc.pageTexts=info.pages;doc.terms=info.text;
+      const {url,local,...saved}=doc;
+      await dbAction("readwrite","put",saved);
+    }catch(error){console.warn(`配線図「${doc.name}」の再読み取りに失敗しました`,error);}
+  }
+}
+async function loadLocalDocuments() { let loaded=false;try { localDocuments.forEach(d=>d.url&&URL.revokeObjectURL(d.url)); localDocuments.splice(0,localDocuments.length,...(await dbAction("readonly","getAll")).map(d=>({...d,local:true,url:URL.createObjectURL(d.blob)}))); await indexUnindexedWiringPdfs(); loaded=true; } catch(e) { uploadStatus.textContent="端末保存を使えません。HTTPSで配布したアプリをインストールして開いてください。"; console.warn(e); } if(loaded)removeOrphanedProjectPages();renderUploadSlots();if(loaded)render(); }
 function mergeGeneratedRecords(baseRecords) {
   try {
-    const saved=JSON.parse(localStorage.getItem(generatedStorageKey)||"[]");
+    const original=JSON.parse(localStorage.getItem(generatedStorageKey)||"[]");
+    const saved=uniqueProjects(original);
+    if(saved.length!==original.length)localStorage.setItem(generatedStorageKey,JSON.stringify(saved));
     const replaced=new Set(saved.map(record=>`${record.area}|${record.projectNumber}`));
     const byId=new Map(saved.map(record=>[record.id,record]));
-    state.records=[...baseRecords.filter(record=>!replaced.has(`${record.area}|${record.projectNumber}`)),...byId.values()];
+    state.records=uniqueProjects([...baseRecords.filter(record=>!replaced.has(`${record.area}|${record.projectNumber}`)),...byId.values()]);
   } catch { state.records=baseRecords; }
 }
 document.querySelector("#projects-tab").addEventListener("click",()=>{document.querySelector("#project-search").hidden=false;document.querySelector("#document-search").hidden=true;document.querySelector("#results").hidden=false;document.querySelector("#projects-tab").classList.add("active");document.querySelector("#documents-tab").classList.remove("active");});
-document.querySelector("#documents-tab").addEventListener("click",()=>{document.querySelector("#project-search").hidden=true;document.querySelector("#document-search").hidden=false;document.querySelector("#results").hidden=true;document.querySelector("#documents-tab").classList.add("active");document.querySelector("#projects-tab").classList.remove("active");loadLocalDocuments();renderDocuments();});
-document.querySelector("#doc-query").addEventListener("input",renderDocuments);
+document.querySelector("#documents-tab").addEventListener("click",()=>{document.querySelector("#project-search").hidden=true;document.querySelector("#document-search").hidden=false;document.querySelector("#results").hidden=true;document.querySelector("#documents-tab").classList.add("active");document.querySelector("#projects-tab").classList.remove("active");loadLocalDocuments();});
 function renderImportReview(projects) {
   pendingProjectImport = projects;
   const review = document.querySelector("#import-review");
-  document.querySelector("#import-preview").innerHTML = projects.map((record,index)=>`<article class="import-card" data-project-index="${index}"><h3>PDF ${record.sourcePage}ページから検出 · ${record.area === "indoor" ? "屋内" : "屋外"}</h3><label>企画番号<input data-field="projectNumber" value="${safe(record.projectNumber)}"></label><label>企画名<input data-field="projectName" value="${safe(record.projectName)}"></label><label>団体名<input data-field="organization" value="${safe(record.organization)}"></label><label>${record.area === "indoor" ? "実施場所" : "テント番号"}<input data-field="place" value="${safe(record.location || record.tentNumber)}"></label>${record.area === "indoor" ? `<label>控室<input data-field="controlRoom" value="${safe(record.controlRoom)}"></label>` : ""}<label>許可電力<input data-field="approvedPower" value="${safe(record.approvedPower)}"></label><label>${record.area === "indoor" ? "使用系統" : "電ドラ情報"}<input data-field="powerDetails" value="${safe(record.powerDetails)}"></label><p class="meta">この企画の電力シート：${record.localReferences[0].pageStart}〜${record.localReferences[0].pageEnd}ページ</p></article>`).join("");
-  document.querySelector("#create-project-pages").textContent=pendingDocument?.replacing?"確認して資料を差し替え、企画ページを更新":"確認した内容で企画ページを作成";
+  document.querySelector("#import-preview").innerHTML = projects.map((record,index)=>`<article class="import-card" data-project-index="${index}"><h3>PDF ${record.sourcePage}ページから検出 · ${record.area === "indoor" ? "屋内" : "屋外"}</h3><label>企画番号<input data-field="projectNumber" value="${safe(record.projectNumber)}"></label><label>企画名<input data-field="projectName" value="${safe(record.projectName)}"></label><label>団体名<input data-field="organization" value="${safe(record.organization)}"></label><label>${record.area === "indoor" ? "実施場所" : "テント番号"}<input data-field="place" value="${safe(record.location || record.tentNumber)}"></label><label>控室<input data-field="controlRoom" value="${safe(record.controlRoom)}"></label><label>許可電力<input data-field="approvedPower" value="${safe(record.approvedPower)}"></label><label>${record.area === "indoor" ? "使用系統" : "電ドラ情報"}<input data-field="powerDetails" value="${safe(record.powerDetails)}"></label><p class="meta">この企画の電力シート：${record.localReferences[0].pageStart}〜${record.localReferences[0].pageEnd}ページ</p></article>`).join("");
+  document.querySelectorAll(".create-project-pages").forEach(button=>{
+    const selected=button.dataset.slot===pendingDocument?.slotId;
+    button.disabled=!selected||projects.length===0;
+    button.textContent=selected?(pendingDocument?.replacing?"確認して差し替える":"企画を登録") : "企画を登録";
+  });
   review.hidden = projects.length === 0;
 }
 document.querySelectorAll(".slot-file-input").forEach(input=>input.addEventListener("change",async event=>{
   const file=event.target.files[0];if(!file)return;
   const slot=uploadSlots.find(item=>item.id===event.target.dataset.slot);if(!slot)return;
+  if(slot.type==="電力シート"){pendingDocument=null;pendingPowerReading=slot.id;renderImportReview([]);}
   const existing=currentSlotDocument(slot);
-  const duplicates=slotDocuments(slot).filter(doc=>doc.id!==existing?.id).map(doc=>doc.id);
-  const item={id:existing?.id||`slot:${slot.id}`,name:file.name,type:slot.type,area:slot.area,terms:"",blob:file,local:true,updatedAt:Date.now()};
+  const slotId=`slot:${slot.id}`;
+  const oldIds=slotDocuments(slot).filter(doc=>doc.id!==slotId).map(doc=>doc.id);
+  const item={id:slotId,slotId:slot.id,name:file.name,type:slot.type,area:slot.area,region:slot.region||"",terms:"",blob:file,local:true,updatedAt:Date.now()};
   try{
     if(!/\.pdf$/i.test(file.name))throw new Error("PDFファイルを選んでください。");
     uploadStatus.textContent=`${slot.type}（${slot.area}）を読み取っています…`;
     const parser=await window.FestivalPdfImportReady;
     if(!parser)throw new Error("PDFの読み取りにはHTTPSで開いたアプリが必要です。");
-    const info=await parser.inspectPdf(file);item.pageCount=info.pageCount;item.terms=info.text;
+    const info=await parser.inspectPdf(file);item.pageCount=info.pageCount;item.terms=info.text;if(slot.type==="配線図")item.pageTexts=info.pages;
     if(slot.type==="電力シート"){
       const extracted=await parser.extractPowerSheet(file);
       if(!extracted.projects.length)throw new Error("企画情報のあるページが見つかりません。文字情報のある電力シートPDFを選んでください。");
       if(extracted.projects.some(project=>project.area!==slot.areaKey))throw new Error(`このPDFには${slot.area}以外の企画も含まれています。該当する屋内／屋外の電力シートを選んでください。`);
       item.terms=[item.terms,...extracted.projects.map(project=>`${project.projectNumber} ${project.projectName} ${project.organization}`)].join(" ").trim();
-      extracted.projects.forEach(project=>{project.localReferences[0].docId=item.id;project.region=slot.area;});
-      pendingDocument={item,slotId:slot.id,replacing:Boolean(existing),removeIds:duplicates};
+      extracted.projects.forEach(project=>{project.localReferences[0].docId=item.id;project.region=slot.region;});
+      pendingDocument={item,slotId:slot.id,replacing:Boolean(existing),removeIds:oldIds};
       renderImportReview(extracted.projects);
       uploadStatus.textContent=`${extracted.projects.length}件の企画候補です。内容を確認し、上のボタンで登録してください。`;
     }else{
       if(existing&&!window.confirm(`「${existing.name}」を「${file.name}」に差し替えます。よろしいですか？`))return;
-      await dbAction("readwrite","put",item);await removeObsoleteSlotDocuments(duplicates);await loadLocalDocuments();
+      await dbAction("readwrite","put",item);await removeObsoleteSlotDocuments(oldIds);await loadLocalDocuments();
       uploadStatus.textContent=`${slot.type}（${slot.area}）に「${file.name}」を${existing?"差し替えました":"登録しました"}。`;
     }
   }catch(error){uploadStatus.textContent=`登録できませんでした：${error.message||"端末の保存領域を確認してください"}`;console.error(error);}
-  finally{event.target.value="";}
-}));document.querySelector("#create-project-pages").addEventListener("click",async()=>{
+  finally{if(slot.type==="電力シート")pendingPowerReading=null;event.target.value="";}
+}));async function saveProjectPages(){
   if(!pendingDocument){uploadStatus.textContent="先に電力シートを選んでください。";return;}
   if(pendingDocument.replacing&&!window.confirm(`「${localDocuments.find(doc=>doc.id===pendingDocument.item.id)?.name||"登録済み資料"}」を選んだ電力シートに差し替え、企画ページを更新します。よろしいですか？`))return;
   const cards=[...document.querySelectorAll(".import-card")];
@@ -154,42 +245,52 @@ document.querySelectorAll(".slot-file-input").forEach(input=>input.addEventListe
   }).filter(project=>project.projectNumber&&project.projectName);
   try {
     const existing=JSON.parse(localStorage.getItem(generatedStorageKey)||"[]");
-    const importedKeys=new Set(records.map(record=>`${record.area}|${record.projectNumber}`));
     const docId=pendingDocument.item.id,obsoleteIds=new Set([docId,...pendingDocument.removeIds]);
-    const retained=existing.filter(record=>!(record.localReferences||[]).some(ref=>obsoleteIds.has(ref.docId))&&!importedKeys.has(`${record.area}|${record.projectNumber}`));
+    const retained=existing.map(record=>withoutDocumentReferences(record,[...obsoleteIds])).filter(item=>item.keep).map(item=>item.record);
     const byId=new Map([...retained,...records].map(record=>[record.id,record]));
-    const saved=[...byId.values()];
+    const saved=uniqueProjects([...byId.values()]);
     await dbAction("readwrite","put",pendingDocument.item);
     await removeObsoleteSlotDocuments(pendingDocument.removeIds);
     localStorage.setItem(generatedStorageKey,JSON.stringify(saved));
-    state.records=[...state.records.filter(record=>!(record.localReferences||[]).some(ref=>obsoleteIds.has(ref.docId))&&!importedKeys.has(`${record.area}|${record.projectNumber}`)),...saved];
+    state.records=uniqueProjects([...state.records.map(record=>withoutDocumentReferences(record,[...obsoleteIds])).filter(item=>item.keep).map(item=>item.record),...records]);
     pendingDocument=null; pendingProjectImport=[];
     document.querySelector("#import-review").hidden=true;
-    document.querySelector("#project-search").hidden=false; document.querySelector("#document-search").hidden=true; document.querySelector("#results").hidden=false;
-    document.querySelector("#projects-tab").classList.add("active"); document.querySelector("#documents-tab").classList.remove("active");
-    uploadStatus.textContent=`${records.length}件の企画ページを作成しました。検索一覧から開けます。`;
+    renderImportReview([]);
+    uploadStatus.textContent=`${records.length}件の企画ページを作成しました。引き続き資料の登録状況を確認できます。`;
     await loadLocalDocuments();
     render();
   } catch(e) { uploadStatus.textContent="企画ページを保存できませんでした。端末の保存領域を確認してください。"; }
-});
-document.querySelector("#cancel-project-pages").addEventListener("click",()=>{pendingDocument=null;pendingProjectImport=[];document.querySelector("#import-review").hidden=true;uploadStatus.textContent="登録を取り消しました。端末内の資料は変更されていません。";});
+}
+document.querySelectorAll(".create-project-pages").forEach(button=>button.addEventListener("click",saveProjectPages));
+document.querySelector("#cancel-project-pages").addEventListener("click",()=>{pendingDocument=null;pendingProjectImport=[];renderImportReview([]);uploadStatus.textContent="登録を取り消しました。端末内の資料は変更されていません。";});
 
 function safe(value) {
   return String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
+async function renderPdfViews() {
+  const parser=await window.FestivalPdfImportReady;
+  for(const container of document.querySelectorAll(".pdf-page-list")){
+    const pages=container.dataset.pages.split(",").map(Number).filter(Number.isFinite);
+    const hitPages=container.dataset.hitPages.split(",").map(Number).filter(Number.isFinite);
+    try{await parser.renderPdfPages(container.dataset.pdfSrc,pages,container,{allPages:container.dataset.allPages==="true",hitPages,viewerId:container.dataset.viewerId});}
+    catch(error){container.textContent="このPDFをページ表示できませんでした。PDFファイルを登録し直してみてください。";console.warn(error);}
+  }
+  document.querySelectorAll(".pdf-page-jump").forEach(button=>button.addEventListener("click",()=>document.getElementById(button.dataset.target)?.scrollIntoView({behavior:"smooth",block:"start"})));
+}
+
 function render() {
-  const detailId = location.hash.match(/^#\/project\/([^/?#]+)$/)?.[1];
+  const detailId = new URLSearchParams(location.search).get("project") || location.hash.match(/^#project=(.*)$/)?.[1] || location.hash.match(/^#\/project\/([^/?#]+)$/)?.[1];
   if (detailId) { renderDetail(decodeURIComponent(detailId)); return; }
   renderList();
 }
 
 function renderList() {
   const q = normalize(input.value);
-  const found = state.records.filter(record =>
+  const found = uniqueProjects(state.records).filter(record =>
     (state.filter === "all" || record.area === state.filter) && (!q || searchable(record).includes(q))
   );
-  status.textContent = q ? `${found.length}件見つかりました` : `${state.records.length}件を登録しています。語句を入力して検索してください。`;
+  status.textContent = q ? `${found.length}件見つかりました` : `${uniqueProjects(state.records).length}件を登録しています。語句を入力して検索してください。`;
   if (!found.length) {
     results.innerHTML = '<div class="empty">一致する企画はありません。番号やキーワードを変えてみてください。</div>';
     return;
@@ -197,8 +298,8 @@ function renderList() {
   results.innerHTML = found.map(record => {
     const areaLabel = record.area === "indoor" ? "屋内" : "屋外";
     const heading = record.projectName || "名称未確認の資料";
-    const meta = [record.projectNumber ? `企画番号：${safe(record.projectNumber)}` : "企画番号：未登録", record.tentNumber ? `テント：${safe(record.tentNumber)}` : "", record.location ? `場所：${safe(record.location)}` : "", record.organization ? `団体：${safe(record.organization)}` : "", record.approvedPower ? `許可電力：${safe(record.approvedPower)}` : ""].filter(Boolean).join("　 ·  ");
-    return `<article class="card"><h2><span class="badge ${record.area === "outdoor" ? "outdoor" : ""}">${areaLabel}</span><a class="title-link" href="#/project/${encodeURIComponent(record.id)}">${safe(heading)}</a></h2><p class="meta">${meta}</p><a class="detail-link" href="#/project/${encodeURIComponent(record.id)}">企画ページを開く →</a></article>`;
+    const meta = [record.projectNumber ? `企画番号：${safe(record.projectNumber)}` : "企画番号：未登録", record.region ? `資料エリア：${safe(record.region)}` : "", record.tentNumber ? `テント：${safe(record.tentNumber)}` : "", record.location ? `場所：${safe(record.location)}` : "", record.organization ? `団体：${safe(record.organization)}` : "", record.approvedPower ? `許可電力：${safe(record.approvedPower)}` : ""].filter(Boolean).join("　 ·  ");
+    return `<article class="card"><h2><span class="badge ${record.area === "outdoor" ? "outdoor" : ""}">${areaLabel}</span><a class="title-link" href="project.html#project=${encodeURIComponent(record.id)}">${safe(heading)}</a></h2><p class="meta">${meta}</p><a class="detail-link" href="project.html#project=${encodeURIComponent(record.id)}">企画ページを開く →</a></article>`;
   }).join("");
 }
 
@@ -207,16 +308,17 @@ function renderDetail(id) {
   if (!record) { results.innerHTML = '<div class="empty">企画が見つかりませんでした。</div><a class="back-link" href="#/">← 一覧に戻る</a>'; status.textContent = ""; return; }
   status.textContent = "企画ページ";
   const areaLabel = record.area === "indoor" ? "屋内" : "屋外";
+  const controlRoom=record.controlRoom||String(record.otherText||"").match(/控室\s*([^。\n]+)/)?.[1]||"";
   const fields = [
-    ["企画番号", record.projectNumber], ["団体", record.organization],
+    ["企画番号", record.projectNumber], ["資料エリア", record.region], ["団体", record.organization],
     [record.area === "indoor" ? "実施場所" : "テント番号", record.location || record.tentNumber],
-    ["控室", record.area === "indoor" ? (record.controlRoom || record.otherText.match(/控室\s*([^。]+)/)?.[1] || "") : ""],
+    ["控室", /^(なし|無|-)$/u.test(controlRoom.trim())?"":controlRoom],
     ["許可電力", record.approvedPower], [record.area === "indoor" ? "使用系統" : "電ドラ情報", record.powerDetails]
   ].filter(([, value]) => value);
   const docs = new Map();
   for (const ref of record.references || []) {
     const key = `${ref.label}|${ref.file}`;
-    if (!docs.has(key)) docs.set(key, { label: ref.label, file: ref.file, pages: [] });
+    if (!docs.has(key)) docs.set(key, { label: ref.label, file: ref.file, pages: [], isWiring:String(ref.label||"").includes("配線図"), allPages:String(ref.label||"").includes("配線図") });
     if (!docs.get(key).pages.includes(Number(ref.page) || 1)) docs.get(key).pages.push(Number(ref.page) || 1);
   }
   for (const ref of record.localReferences || []) {
@@ -226,22 +328,30 @@ function renderDetail(id) {
     if(!docs.has(key)) docs.set(key,{label:ref.label,local:true,url:source.url,pages:[],pageStart:ref.pageStart,pageEnd:ref.pageEnd,pageCount:source.pageCount||ref.pageEnd});
     for(let page=ref.pageStart;page<=ref.pageEnd;page++) docs.get(key).pages.push(page);
   }
-  const projectTerms=[record.projectNumber,record.projectName].map(normalize).filter(term=>term.length>1);
-  const localWires=localDocuments.filter(doc=>{
-    if(doc.type!=="配線図") return false;
-    const scopeMatch=["全エリア",record.region,record.area==="indoor"?"屋内":"屋外"].filter(Boolean).includes(doc.area);
-    const text=normalize(doc.terms);
-    return scopeMatch||projectTerms.some(term=>text.includes(term));
-  });
-  for(const wire of localWires){const key=`配線図|local:${wire.id}`;if(!docs.has(key))docs.set(key,{label:`関連配線図 · ${wire.area}`,local:true,wholeFile:true,url:wire.url,pages:[],pageCount:wire.pageCount||1});}
+  const outdoorHasRoom=record.area==="outdoor"&&Boolean(controlRoom.trim())&&!/^(なし|無|-)$/u.test(controlRoom.trim());
+  const expectedWiringAreas=outdoorHasRoom?["屋外","屋内"]:[record.area==="indoor"?"屋内":"屋外"];
+  const localWires=localDocuments.filter(doc=>doc.type==="配線図"&&["全エリア",...expectedWiringAreas].includes(doc.area));
+  const staticWiring=(record.references||[]).filter(ref=>String(ref.label||"").includes("配線図"));
+  const missingWiringAreas=expectedWiringAreas.filter(area=>!localWires.some(doc=>doc.area===area||doc.area==="全エリア")&&!staticWiring.some(ref=>String(ref.label||"").includes(area)||!String(ref.label||"").match(/屋内|屋外/)));
+  const wireNotice=missingWiringAreas.length?`<p class="empty">${safe(missingWiringAreas.join("・"))}の配線図PDFが登録されていません。</p>`:"";
+  for(const wire of localWires){
+    const selection=wiringPageSelection(record.projectName,wire.pageTexts||[],wire.pageCount);
+    const key=`配線図|local:${wire.id}`;
+    if(!docs.has(key))docs.set(key,{label:`配線図 · ${wire.area}`,local:true,url:wire.url,pages:selection.displayPages,matchedPages:selection.matchedPages,pageCount:wire.pageCount||1,allPages:true,isWiring:true,searchFailed:!(wire.pageTexts||[]).length,unmatched:selection.fallback});
+  }
   const fieldHtml = fields.map(([label, value]) => `<div class="detail-field"><dt>${safe(label)}</dt><dd>${safe(value)}</dd></div>`).join("");
   const docHtml = [...docs.values()].map((doc, index) => {
-    const first = doc.wholeFile ? 1 : Math.min(...doc.pages);
-    const pages = doc.wholeFile ? `PDF全体（${doc.pageCount}ページ）` : doc.pages.sort((a,b) => a-b).map(page => `<a href="${doc.local?doc.url:`data/${safe(doc.file)}`}#page=${page}" target="_blank" rel="noopener">${page}ページ</a>`).join("");
+    const first = doc.pages.length ? Math.min(...doc.pages) : 1;
+    const matchedPages=doc.matchedPages||[];
+    const pages = doc.isWiring ? doc.searchFailed ? "企画名を検索できませんでした。配線図全体を下へスクロールして確認できます。" : matchedPages.length ? `企画名が見つかったページ：${matchedPages.join("、")}。配線図全体を下へスクロールして確認できます。` : `企画名は見つかりませんでした。配線図全体（${doc.pageCount||"全"}ページ）を表示します。` : doc.pages.length ? `参照ページ：${doc.pages.sort((a,b) => a-b).join("、")}` : "";
     const href=doc.local?doc.url:`data/${safe(doc.file)}`;
-    return `<section class="document-panel"><h3>${safe(doc.label)}</h3><p class="page-links">該当ページ：${pages}</p><iframe title="${safe(doc.label)}、${first}ページ" src="${href}#page=${first}&toolbar=1" loading="${index > 0 ? "lazy" : "eager"}"></iframe><a class="open-pdf" href="${href}#page=${first}" target="_blank" rel="noopener">PDFを別画面で開く ↗</a></section>`;
-  }).join("");
-  results.innerHTML = `<a class="back-link" href="#/">← 検索一覧に戻る</a><article class="card detail-card"><p class="eyebrow">${areaLabel} · 企画詳細</p><h2>${safe(record.projectName || "名称未確認の企画")}</h2><dl class="detail-fields">${fieldHtml}</dl>${record.otherText ? `<p class="detail-note">${safe(record.otherText)}</p>` : ""}</article><h2 class="section-heading">関連資料</h2>${docHtml}`;
+    const viewerId=`pdf-viewer-${index}`;
+    const jumpPages=doc.isWiring?matchedPages:doc.pages;
+    const jumpNav=jumpPages.length?`<nav class="pdf-page-jumps" aria-label="該当ページへ移動">${jumpPages.map(page=>`<button class="pdf-page-jump" type="button" data-target="${viewerId}-page-${page}">${page}ページへ</button>`).join("")}</nav>`:"";
+    return `<section class="document-panel"><h3>${safe(doc.label)}</h3><p class="page-links">${pages}</p><p class="pdf-scroll-hint">左右にスワイプしてページを切り替えられます。</p>${jumpNav}<div class="pdf-page-list" data-pdf-src="${safe(href)}" data-pages="${doc.allPages?"":doc.pages.join(",")}" data-all-pages="${doc.allPages?"true":"false"}" data-hit-pages="${matchedPages.join(",")}" data-viewer-id="${viewerId}"></div></section>`;
+  }).join("") || '<p class="empty">この企画の関連PDFはまだ登録されていません。</p>';
+  results.innerHTML = `<a class="back-link" href="index.html">← 検索一覧に戻る</a><article class="card detail-card"><p class="eyebrow">${areaLabel} · 企画詳細</p><h2>${safe(record.projectName || "名称未確認の企画")}</h2><dl class="detail-fields">${fieldHtml}</dl>${record.otherText ? `<p class="detail-note">${safe(record.otherText)}</p>` : ""}</article><h2 class="section-heading">関連資料</h2>${wireNotice}${docHtml}`;
+  renderPdfViews();
 }
 
 input.addEventListener("input", render);
@@ -262,11 +372,10 @@ if (window.FESTIVAL_DATA) {
     .then(render)
     .catch(error => { status.textContent = "検索データを読み込めません。READMEの起動方法を確認してください。"; console.error(error); });
 }
-const list=document.createElement("section"); list.id="document-results"; list.className="results"; document.querySelector(".search-panel").after(list); documentResults=list;
 
 if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
   window.addEventListener("load", () => navigator.serviceWorker.register("service-worker.js").catch(console.warn));
 }
 }
 
-if (typeof module !== "undefined") module.exports = { normalize, searchable };
+if (typeof module !== "undefined") module.exports = { normalize, searchable, matchPdfPages, wiringPageSelection, uniqueProjects };
